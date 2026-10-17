@@ -1,5 +1,5 @@
 #!/bin/bash
-# relay.sh — Warp Relay v7.0 — UDP relay hub (kernel DNAT) with watchdog + TUI
+# relay.sh - Warp Relay v7.0 - UDP relay hub (kernel DNAT) with watchdog and TUI
 # https://github.com/BlackSysShark25/warp-relay   (MIT)
 #
 # Turns a VPS into a transparent UDP relay: clients connect to <relay-ip>:<port>,
@@ -8,10 +8,12 @@
 # no extra latency, hostnames are re-resolved automatically.
 #
 # USAGE:
-#   sudo ./relay.sh          — First-time setup wizard, then management TUI
-#   sudo relay               — Management TUI directly (after install)
-#   sudo ./relay.sh --setup  — Force re-run setup
-#   relay.sh --version | --help
+#   sudo ./relay.sh            First-time setup wizard, then management TUI
+#   sudo relay                 Management TUI (after install)
+#   sudo relay --setup         Re-run the setup wizard
+#   sudo relay --update        Fetch the latest version from GitHub and reinstall
+#   relay --check-update       Show installed and latest version
+#   relay --version | --help
 
 set -uo pipefail
 
@@ -38,13 +40,15 @@ REFRESH_LIVE=10
 WARP_HOST="engage.cloudflareclient.com"
 WARP_SRC_PORT=4500
 WARP_DST_PORT=2408
+# Self-update source (branch main always carries the latest release)
+REPO_RAW="https://raw.githubusercontent.com/BlackSysShark25/warp-relay/main"
 
 # ── Mode detection ─────────────────────────────────────────────────────────────
 # relay.sh  → setup mode    |    relay (no .sh) → TUI mode
 case "${1:-}" in
     -v|--version) echo "Warp Relay v${VERSION}"; exit 0 ;;
     -h|--help)
-        sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
         exit 0 ;;
 esac
 SCRIPT_SELF="$(realpath "$0" 2>/dev/null || echo "$0")"
@@ -178,8 +182,8 @@ get_uptime_str() {
     local since start now diff d h m
     since=$(systemctl show warp-relay-watchdog \
             --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2)
-    [[ -z "$since" || "$since" == "n/a" ]] && echo "—" && return
-    start=$(date -d "$since" +%s 2>/dev/null) || { echo "—"; return; }
+    [[ -z "$since" || "$since" == "n/a" ]] && echo "-" && return
+    start=$(date -d "$since" +%s 2>/dev/null) || { echo "-"; return; }
     now=$(date +%s); diff=$(( now - start ))
     d=$(( diff/86400 )); h=$(( diff%86400/3600 )); m=$(( diff%3600/60 ))
     [[ $d -gt 0 ]] && echo "${d}d ${h}h ${m}m" && return
@@ -234,14 +238,14 @@ port_in_use() { read_mappings | awk '{print $2}' | grep -q "^${1}$"; }
 
 # ── iptables-legacy ────────────────────────────────────────────────────────────
 ensure_iptables_legacy() {
-    # Backend-agnostic — do NOT switch to legacy. The relay's DNAT/MASQUERADE/FORWARD
+    # Backend-agnostic - do NOT switch to legacy. The relay's DNAT/MASQUERADE/FORWARD
     # work on the modern nft backend; force-switching split rules from nft-based tproxy/AWG/mesh and
     # broke firewalls. Just report the current backend and keep it.
     local current
     current=$(update-alternatives --get-selections 2>/dev/null \
               | awk '/^iptables[[:space:]]/{print $NF}')
     [[ "$SCRIPT_MODE" == "setup" ]] && \
-        echo -e "  ${G}✓${RESET}  iptables backend: ${G}${current:-default}${RESET} (kept as-is — backend-agnostic)"
+        echo -e "  ${G}✓${RESET}  iptables backend: ${G}${current:-default}${RESET} (kept as-is - backend-agnostic)"
     return 0
 }
 
@@ -249,7 +253,7 @@ apply_sysctl() {
     # v7: make nf_conntrack load BEFORE systemd-sysctl. Otherwise the
     # net.netfilter.* keys do not exist yet at boot, systemd-sysctl silently
     # skips them ("Couldn't write ... No such file or directory") and the module
-    # later comes up with the kernel defaults (udp 30s / stream 120s) — UDP
+    # later comes up with the kernel defaults (udp 30s / stream 120s) - UDP
     # sessions through the relay then die every 30 s of silence until someone
     # runs `sysctl --system` by hand. Symptom to check on an installed node:
     #   journalctl -b -u systemd-sysctl | grep "Couldn't write"
@@ -276,7 +280,7 @@ init_config() {
     mkdir -p "$CONFIG_DIR"
     touch "$LOG_FILE"
     [[ -f "$CONFIG_FILE" ]] || cat > "$CONFIG_FILE" << 'CONF'
-# Warp Relay — port mappings
+# Warp Relay - port mappings
 # Format: SRC_IP  SRC_PORT  DST_HOST_OR_IP  DST_PORT  LABEL
 # SRC_IP is informational (rules match any LOCAL address of this node).
 # DST_HOST may be a hostname: it is re-resolved on every apply and by the watchdog.
@@ -299,7 +303,7 @@ apply_one() {
     local src_port="$1" dst_ip="$2" dst_port="$3"
     remove_one_rules "$src_port" "$dst_ip" "$dst_port" 2>/dev/null || true
     # v2.1: PREROUTING guarded by `-m addrtype --dst-type LOCAL` so DNAT fires only
-    # for packets addressed to a LOCAL IP of THIS node — does NOT hijack transit
+    # for packets addressed to a LOCAL IP of THIS node - does NOT hijack transit
     # UDP:src_port traffic of clients (e.g. IPsec/AWG rekey to some 3rd party :4500).
     iptables -t nat -A PREROUTING \
         -p udp -m addrtype --dst-type LOCAL --dport "$src_port" -m comment --comment "$TAG" \
@@ -419,15 +423,15 @@ geolocate_batch() {
 write_apply_script() {
     cat > "$APPLY_SCRIPT" << 'APPLYEOF'
 #!/bin/bash
-# warp-relay-apply (Warp Relay v7 — replace-aware + LOCAL guard + exact-match):
+# warp-relay-apply (Warp Relay v7 - replace-aware + LOCAL guard + exact-match):
 #   - backend-agnostic, netmax-conntrack (120/180), MASQUERADE --random-fully
 #   - rule_ok verifies EXACT dport+DST+LOCAL-guard; stale WR_RULE on same dport with different
 #     --to-destination or missing LOCAL match is auto-flushed before rebuild
 #   - PREROUTING DNAT is guarded by `-m addrtype --dst-type LOCAL` so it fires only on packets
 #     addressed to a LOCAL IP of THIS node (does NOT touch transit UDP:sp traffic of clients)
 # Modes:
-#   warp-relay-apply           — normal (idempotent, patch-only stale)
-#   warp-relay-apply --replace — force: flush ALL WR_RULE, rebuild from mappings.conf
+#   warp-relay-apply           - normal (idempotent, patch-only stale)
+#   warp-relay-apply --replace - force: flush ALL WR_RULE, rebuild from mappings.conf
 set -uo pipefail
 TAG="WR_RULE"
 CONFIG_FILE="/etc/warp-relay/mappings.conf"
@@ -466,7 +470,7 @@ flush_all_wr() {
     log "flush_all_wr: cleared all WR_RULE"
 }
 
-# Sysctl — forwarding + conntrack 120/180 (NEVER the kernel default 30 s: it kills idle UDP sessions).
+# Sysctl - forwarding + conntrack 120/180 (NEVER the kernel default 30 s: it kills idle UDP sessions).
 # nf_conntrack is loaded first so the net.netfilter.* keys exist (see apply_sysctl in relay.sh).
 modprobe nf_conntrack 2>/dev/null || true
 cat > "$SYSCTL_FILE" << 'SEOF'
@@ -515,7 +519,7 @@ STALL_TIMEOUT=${STALL_TIMEOUT}
 
 log() { echo "\$(date '+%F %T') [watchdog] \$*" >> "\$LOG_FILE" 2>/dev/null; logger -t warp-relay-watchdog "\$*" 2>/dev/null || true; }
 
-# Backend-agnostic — the watchdog does NOT switch the iptables backend.
+# Backend-agnostic - the watchdog does NOT switch the iptables backend.
 resolve() {
     local h="\$1"
     [[ "\$h" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\$ ]] && echo "\$h" && return
@@ -551,7 +555,7 @@ while true; do
         if [[ -z "\$pb" ]]; then prev_bytes[\$key]="\$cur"; stall_since[\$key]=0; continue; fi
         if [[ "\$cur" -eq "\$pb" ]]; then
             # v7: a counter that has NEVER moved since the watchdog started means the
-            # mapping is simply idle — nobody is using it. That is not a stall: no
+            # mapping is simply idle - nobody is using it. That is not a stall: no
             # conntrack flush, no log noise. (The old logic produced tens of
             # thousands of false "STALL" lines per day on idle relays.)
             if [[ -z "\${seen_move[\$key]:-}" ]]; then stall_since[\$key]=0; continue; fi
@@ -609,7 +613,7 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-    # v7: belt-and-braces — re-apply our sysctl once the network is up, in case
+    # v7: belt-and-braces - re-apply our sysctl once the network is up, in case
     # systemd-sysctl ran before nf_conntrack existed (see apply_sysctl).
     cat > "$REAPPLY_SERVICE" << EOF
 [Unit]
@@ -654,6 +658,57 @@ install_relay_bin() {
     log_msg "relay binary installed: $RELAY_BIN"
 }
 
+# ── Self-update from GitHub ───────────────────────────────────────────────────
+fetch_latest_script() {
+    # Downloads relay.sh from the repository into a temp file, validates it and
+    # prints the path. Prints nothing and returns 1 on any problem.
+    local tmp
+    tmp=$(mktemp /tmp/relay.XXXXXX) || return 1
+    if ! curl -fsSL --max-time 30 "${REPO_RAW}/relay.sh" -o "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! bash -n "$tmp" 2>/dev/null || ! grep -q '^VERSION=' "$tmp"; then rm -f "$tmp"; return 1; fi
+    echo "$tmp"
+}
+
+script_version_of() { grep -m1 '^VERSION=' "$1" | cut -d'"' -f2; }
+
+check_update() {
+    local tmp lv
+    tmp=$(fetch_latest_script) || { echo "Cannot download ${REPO_RAW}/relay.sh"; return 1; }
+    lv=$(script_version_of "$tmp"); rm -f "$tmp"
+    echo "installed: v${VERSION}   latest: v${lv}"
+    if [[ "$lv" == "$VERSION" ]]; then echo "up to date"; else echo "update available: sudo relay --update"; fi
+}
+
+do_update() {
+    [[ $EUID -ne 0 ]] && { echo "Root required: sudo relay --update"; return 1; }
+    local tmp lv
+    echo "Downloading ${REPO_RAW}/relay.sh ..."
+    tmp=$(fetch_latest_script) || { echo "Download or validation failed, nothing was changed"; return 1; }
+    lv=$(script_version_of "$tmp")
+    if [[ "$lv" == "$VERSION" && "${1:-}" != "--force" ]]; then
+        echo "Already on v${VERSION} (relay --update --force reinstalls anyway)"
+        rm -f "$tmp"; return 0
+    fi
+    cp "$RELAY_BIN" "${RELAY_BIN}.bak" 2>/dev/null || true
+    install -m 0755 "$tmp" "$RELAY_BIN"; rm -f "$tmp"
+    log_msg "updated relay v${VERSION} -> v${lv}"
+    echo "relay v${VERSION} -> v${lv} installed to ${RELAY_BIN} (previous copy: ${RELAY_BIN}.bak)"
+    # The NEW version regenerates its own helper scripts and units.
+    "$RELAY_BIN" --reinstall-services
+}
+
+reinstall_services_cli() {
+    [[ $EUID -ne 0 ]] && { echo "Root required"; return 1; }
+    mkdir -p "$CONFIG_DIR"; touch "$LOG_FILE" 2>/dev/null || true
+    apply_sysctl
+    write_apply_script; write_watchdog_script; write_services
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now warp-relay-sysctl-reapply warp-relay-apply warp-relay-watchdog >/dev/null 2>&1 || true
+    systemctl restart warp-relay-apply warp-relay-watchdog 2>/dev/null || true
+    log_msg "services and helper scripts regenerated (v${VERSION})"
+    echo "Helper scripts and systemd units regenerated for v${VERSION}; rules re-applied, watchdog restarted."
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SETUP MODE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -662,7 +717,7 @@ run_setup() {
 
     clear
     echo -e "\n  ${BOLD}${C}╔══════════════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "  ${BOLD}${C}║${RESET}  ${W}Warp Relay v${VERSION} — Setup Wizard${RESET}                              ${BOLD}${C}║${RESET}"
+    echo -e "  ${BOLD}${C}║${RESET}  ${W}Warp Relay v${VERSION} - Setup Wizard${RESET}                              ${BOLD}${C}║${RESET}"
     echo -e "  ${BOLD}${C}╚══════════════════════════════════════════════════════════════════════╝${RESET}"
     blank
 
@@ -676,7 +731,7 @@ run_setup() {
         apt-get install -y -qq \
             iptables curl bc jq conntrack \
             netfilter-persistent iptables-persistent \
-            >/dev/null 2>&1 && echo -e "${G}OK${RESET}" || echo -e "${Y}some packages failed — check manually${RESET}"
+            >/dev/null 2>&1 && echo -e "${G}OK${RESET}" || echo -e "${Y}some packages failed - check manually${RESET}"
     else
         warn "Not a Debian/Ubuntu system: install iptables, conntrack, curl, jq yourself"
         warn "and make sure iptables rules are restored at boot (netfilter-persistent or equivalent)"
@@ -746,9 +801,9 @@ run_setup() {
     install_relay_bin
     info "Command ${W}relay${RESET} installed → type ${W}relay${RESET} anytime to open management console"
 
-    # 11. If iptables backend was switched — re-apply
+    # 11. If iptables backend was switched - re-apply
     if [[ "$IPTABLES_BACKEND_SWITCHED" -eq 1 ]]; then
-        blank; warn "iptables backend was just switched — re-applying all rules..."
+        blank; warn "iptables backend was just switched - re-applying all rules..."
         apply_all >/dev/null
         info "Rules re-applied"
     fi
@@ -996,7 +1051,7 @@ screen_live() {
         done
 
         clear
-        draw_box "Warp Relay v${VERSION} — Live Dashboard" "$(date '+%d.%m.%Y  %H:%M:%S')"
+        draw_box "Warp Relay v${VERSION} - Live Dashboard" "$(date '+%d.%m.%Y  %H:%M:%S')"
         draw_sysbar
         printf "  %s\n" "$(sep_line $(( COLS - 2 )) "─" "$ZS")"
 
@@ -1100,7 +1155,7 @@ screen_clients() {
         local SEP_IN; printf -v SEP_IN '─%.0s' $(seq 1 $(( W - 4 )))
 
         clear
-        draw_box "Warp Relay v${VERSION} — Connected Clients" "$(date '+%d.%m.%Y  %H:%M:%S')"
+        draw_box "Warp Relay v${VERSION} - Connected Clients" "$(date '+%d.%m.%Y  %H:%M:%S')"
         draw_sysbar
         printf "\n"
 
@@ -1190,7 +1245,7 @@ screen_clients() {
                 b) tput smcup 2>/dev/null; screen_live; return ;;
                 r) break ;;
                 p) _paused=1
-                   printf "\n  %s⏸  PAUSED — scroll freely, press [p] to resume%s\n" "$ZY" "$Z0"
+                   printf "\n  %s⏸  PAUSED - scroll freely, press [p] to resume%s\n" "$ZY" "$Z0"
                    break ;;
             esac
             (( $(date +%s) - ts_start >= REFRESH_LIVE )) && break
@@ -1207,7 +1262,7 @@ screen_manage() {
     while true; do
         term_size
         clear
-        draw_box "Warp Relay v${VERSION} — Manage Mappings" "$(date '+%H:%M:%S')"
+        draw_box "Warp Relay v${VERSION} - Manage Mappings" "$(date '+%H:%M:%S')"
         draw_sysbar
         printf "  %s\n\n" "$(sep_line $(( COLS - 2 )) "─" "$ZS")"
 
@@ -1251,7 +1306,7 @@ screen_manage() {
                 q) _on_exit ;;
                 b) screen_live; return ;;
                 n) screen_add_mapping;  return ;;
-                r) clear  # Re-apply all — intentional uppercase R, but read_key lowercases
+                r) clear  # Re-apply all - intentional uppercase R, but read_key lowercases
                    printf "\n  %sRe-applying all rules to iptables...%s\n" "$ZY" "$Z0"
                    local cnt; cnt=$(apply_all)
                    printf "  %sApplied %s rule(s).%s\n" "$ZG" "$cnt" "$Z0"
@@ -1286,7 +1341,7 @@ screen_mapping_actions() {
 
     while true; do
         clear
-        draw_box "Warp Relay v${VERSION} — Mapping :${port}  ${lbl}" "→ ${dst}:${dport}"
+        draw_box "Warp Relay v${VERSION} - Mapping :${port}  ${lbl}" "→ ${dst}:${dport}"
         printf "\n"
         local dst_ip; dst_ip=$(resolve_host "$dst")
         local ok="${ZR}✗ inactive${Z0}"
@@ -1334,7 +1389,7 @@ screen_mapping_actions() {
 # ── Add / Edit / Delete mappings ──────────────────────────────────────────────
 screen_add_mapping() {
     cursor_show; clear
-    draw_box "Warp Relay v${VERSION} — New Mapping" ""
+    draw_box "Warp Relay v${VERSION} - New Mapping" ""
     printf "\n"
     local src_port dst_host dst_port lbl
     printf "  %sExternal UDP port%s (e.g. 51820): " "$ZY" "$Z0"; read -r src_port
@@ -1362,7 +1417,7 @@ screen_edit_mapping() {
     local old_line="$1"
     parse_mapping "$old_line"
     cursor_show; clear
-    draw_box "Warp Relay v${VERSION} — Edit :${M_SRC_PORT}" ""
+    draw_box "Warp Relay v${VERSION} - Edit :${M_SRC_PORT}" ""
     printf "\n  %sLeave blank to keep current value.%s\n\n" "$ZD" "$Z0"
     local np nh nd nl
     printf "  %sPort%s        [%s]: "  "$ZY" "$Z0" "$M_SRC_PORT";  read -r np
@@ -1393,7 +1448,7 @@ screen_delete_mapping() {
     local old_line="$1"
     parse_mapping "$old_line"
     cursor_show; clear
-    draw_box "Warp Relay v${VERSION} — Delete :${M_SRC_PORT}" ""
+    draw_box "Warp Relay v${VERSION} - Delete :${M_SRC_PORT}" ""
     printf "\n  %sDelete: :${M_SRC_PORT} → ${M_DST_HOST}:${M_DST_PORT} (${M_LABEL})%s\n\n" "$ZR" "$Z0"
     printf "  %sConfirm? [y/N]%s " "$ZY" "$Z0"; read -r ans
     if [[ "${ans,,}" == "y" ]]; then
@@ -1413,7 +1468,7 @@ screen_delete_mapping() {
 # ══════════════════════════════════════════════════════════════════════════════
 screen_warp() {
     cursor_show; clear
-    draw_box "Warp Relay v${VERSION} — Cloudflare WARP Setup" ""
+    draw_box "Warp Relay v${VERSION} - Cloudflare WARP Setup" ""
     printf "\n"
     printf "  %sCloudflare WARP%s: clients use %s:%s/UDP%s on this relay → %s%s:%s%s\n" \
            "$ZW" "$Z0" "$ZT" "$WARP_SRC_PORT" "$Z0" "$ZC" "$WARP_HOST" "$WARP_DST_PORT" "$Z0"
@@ -1469,14 +1524,14 @@ screen_warp() {
 # ══════════════════════════════════════════════════════════════════════════════
 screen_diagnostics() {
     cursor_show; clear
-    draw_box "Warp Relay v${VERSION} — Diagnostics" ""
+    draw_box "Warp Relay v${VERSION} - Diagnostics" ""
     printf "\n"
 
     # System checks
     local fwd; fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "?")
     [[ "$fwd" == "1" ]] \
         && printf "  %s✓%s  IP forwarding: %sON%s\n" "$ZG" "$Z0" "$ZG" "$Z0" \
-        || printf "  %s✗%s  IP forwarding: %sOFF — run: sysctl -w net.ipv4.ip_forward=1%s\n" "$ZR" "$Z0" "$ZR" "$Z0"
+        || printf "  %s✗%s  IP forwarding: %sOFF - run: sysctl -w net.ipv4.ip_forward=1%s\n" "$ZR" "$Z0" "$ZR" "$Z0"
 
     local ct_cur ct_max
     ct_cur=$(conntrack -L 2>/dev/null | wc -l || echo "?")
@@ -1488,7 +1543,7 @@ screen_diagnostics() {
     fwd_cnt=$(iptables -S 2>/dev/null | grep -c "$TAG" 2>/dev/null) || fwd_cnt=0
     [[ $nat_cnt -gt 0 ]] \
         && printf "  %s✓%s  NAT rules: %s%s%s\n" "$ZG" "$Z0" "$ZW" "$nat_cnt" "$Z0" \
-        || printf "  %s✗%s  NAT rules: %s0 — not applied!%s\n" "$ZR" "$Z0" "$ZR" "$Z0"
+        || printf "  %s✗%s  NAT rules: %s0 - not applied!%s\n" "$ZR" "$Z0" "$ZR" "$Z0"
     printf "  %s»%s  FORWARD rules: %s%s%s\n" "$ZC" "$Z0" "$ZW" "$fwd_cnt" "$Z0"
 
     local iptver
@@ -1536,7 +1591,7 @@ screen_services() {
     local SVCS=("warp-relay-sysctl-reapply" "warp-relay-apply" "warp-relay-watchdog")
     while true; do
         clear
-        draw_box "Warp Relay v${VERSION} — Services" "$(date '+%H:%M:%S')"
+        draw_box "Warp Relay v${VERSION} - Services" "$(date '+%H:%M:%S')"
         printf "\n"
         local svc
         for svc in "${SVCS[@]}"; do
@@ -1553,6 +1608,7 @@ screen_services() {
                "$ZY" "$ZD" "$ZY" "$ZD" "$ZY" "$ZD" "$ZY" "$ZD" "$ZY" "$ZD"
         printf "  %s[6]%s (Re)install services + scripts\n" "$ZY" "$ZD"
         printf "  %s[7]%s Uninstall services\n" "$ZY" "$ZD"
+        printf "  %s[8]%s Update from GitHub (installed: v%s)\n" "$ZY" "$ZD" "$VERSION"
         printf "  %s[b]%s Back   %s[q]%s Quit\n" "$ZY" "$ZD" "$ZY" "$Z0"
 
         local ts_svc; ts_svc=$(date +%s)
@@ -1568,10 +1624,21 @@ screen_services() {
                 5) for svc in "${SVCS[@]}"; do systemctl disable "$svc" 2>/dev/null; done; break ;;
                 6) screen_reinstall_services; return ;;
                 7) screen_uninstall_services; return ;;
+                8) screen_update; return ;;
             esac
             (( $(date +%s) - ts_svc >= REFRESH_LIVE )) && break
         done
     done
+}
+
+screen_update() {
+    cursor_show; clear
+    printf "\n  %sChecking GitHub for a newer version...%s\n\n" "$ZY" "$Z0"
+    do_update
+    printf "\n  Press any key...\n"; read -r -s -n 1
+    cursor_hide
+    # the installed script may be newer than the one running now: start it fresh
+    exec "$RELAY_BIN"
 }
 
 screen_reinstall_services() {
@@ -1610,7 +1677,7 @@ screen_uninstall_services() {
 # ══════════════════════════════════════════════════════════════════════════════
 screen_log() {
     cursor_show; clear
-    draw_box "Warp Relay v${VERSION} — Log" "$LOG_FILE"
+    draw_box "Warp Relay v${VERSION} - Log" "$LOG_FILE"
     printf "\n"
     if [[ -f "$LOG_FILE" && -s "$LOG_FILE" ]]; then
         tail -40 "$LOG_FILE" | while IFS= read -r line; do
@@ -1684,10 +1751,15 @@ screen_main() {
 # ══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
+case "${1:-}" in
+    --update)             do_update "${2:-}"; exit $? ;;
+    --check-update)       check_update;        exit $? ;;
+    --reinstall-services) reinstall_services_cli; exit $? ;;
+esac
 if [[ "$SCRIPT_MODE" == "setup" ]]; then
     run_setup
 else
-    # TUI mode — called as 'relay'
+    # TUI mode - called as 'relay'
     check_tui_deps
     mkdir -p "$CONFIG_DIR"
     [[ -f "$CONFIG_FILE" ]] || touch "$CONFIG_FILE"
