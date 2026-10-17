@@ -1,5 +1,13 @@
 # Changelog
 
+## 7.0.1 (2026-10-17)
+
+* The sysctl file written by the relay (`/etc/sysctl.d/90-warp-relay.conf`) now contains only
+  `ip_forward`, the two UDP conntrack timeouts and `nf_conntrack_acct`. It no longer sets
+  `nf_conntrack_max` or socket buffer sizes: on hosts with their own tuning the post-boot
+  re-apply unit was lowering those values. Found by a fleet standard check right after the
+  v7.0 rollout. Update with `sudo relay --update`.
+
 ## 7.0 (2026-10-17), first public release
 
 Everything below was found and fixed on a fleet of relay hubs before it got here.

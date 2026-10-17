@@ -1,5 +1,5 @@
 #!/bin/bash
-# relay.sh - Warp Relay v7.0 - UDP relay hub (kernel DNAT) with watchdog and TUI
+# relay.sh - Warp Relay v7.0.1 - UDP relay hub (kernel DNAT) with watchdog and TUI
 # https://github.com/BlackSysShark25/warp-relay   (MIT)
 #
 # Turns a VPS into a transparent UDP relay: clients connect to <relay-ip>:<port>,
@@ -18,7 +18,7 @@
 set -uo pipefail
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION="7.0"
+VERSION="7.0.1"
 TAG="WR_RULE"
 WR_CLIENT_TAG="WR_CLIENT"
 CONFIG_DIR="/etc/warp-relay"
@@ -259,14 +259,14 @@ apply_sysctl() {
     #   journalctl -b -u systemd-sysctl | grep "Couldn't write"
     echo "nf_conntrack" > "$MODULES_FILE"
     modprobe nf_conntrack 2>/dev/null || true
+    # Only what the relay really needs. No nf_conntrack_max and no socket buffer
+    # sizes here: those belong to the host's own tuning, and re-applying this
+    # file after boot must never lower values another sysctl.d file has raised.
     cat > "$SYSCTL_FILE" << 'EOF'
 net.ipv4.ip_forward=1
-net.netfilter.nf_conntrack_max=262144
 net.netfilter.nf_conntrack_udp_timeout=120
 net.netfilter.nf_conntrack_udp_timeout_stream=180
 net.netfilter.nf_conntrack_acct=1
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
 EOF
     sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
 }
@@ -473,9 +473,10 @@ flush_all_wr() {
 # Sysctl - forwarding + conntrack 120/180 (NEVER the kernel default 30 s: it kills idle UDP sessions).
 # nf_conntrack is loaded first so the net.netfilter.* keys exist (see apply_sysctl in relay.sh).
 modprobe nf_conntrack 2>/dev/null || true
+# Only forwarding, the two UDP timeouts and accounting. Never nf_conntrack_max or
+# socket buffers: re-applying those would override the host's own tuning.
 cat > "$SYSCTL_FILE" << 'SEOF'
 net.ipv4.ip_forward=1
-net.netfilter.nf_conntrack_max=262144
 net.netfilter.nf_conntrack_udp_timeout=120
 net.netfilter.nf_conntrack_udp_timeout_stream=180
 net.netfilter.nf_conntrack_acct=1
