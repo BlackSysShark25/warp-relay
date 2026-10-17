@@ -1,0 +1,14 @@
+# Warp Relay — UDP port mappings
+# One mapping per line:
+#   SRC_IP  SRC_PORT  DST_HOST_OR_IP  DST_PORT  LABEL
+#
+# SRC_IP is informational (rules match any LOCAL address of this node),
+# SRC_PORT is the UDP port clients connect to on the relay,
+# DST_HOST may be a hostname — it is re-resolved on every apply and by the watchdog.
+#
+# Cloudflare WARP (WireGuard data port is 2408, NOT 4500):
+0.0.0.0  4500   engage.cloudflareclient.com  2408   cloudflare-warp
+# WireGuard / AmneziaWG server abroad, same port on both sides:
+0.0.0.0  51820  wg.example.com               51820  wg-germany
+# Different external and internal ports:
+0.0.0.0  40000  203.0.113.10                 51821  awg-finland

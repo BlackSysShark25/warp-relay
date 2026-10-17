@@ -1,0 +1,8 @@
+# local scratch
+*.bak
+*.orig
+*.log
+/mappings.conf
+/.idea/
+/.vscode/
+Thumbs.db
